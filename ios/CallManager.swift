@@ -3,7 +3,7 @@ import NitroModules
 import OSLog
 import UIKit
 
-public class CallManager: HybridCallManagerSpec {
+class CallManager: HybridCallManagerSpec {
     private let logger = Logger(subsystem: "com.qusaieilouti99.callmanager", category: "CallManager")
 
     public override init() {
