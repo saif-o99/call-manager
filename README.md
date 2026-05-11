@@ -23,6 +23,24 @@ import { multiply } from '@qusaieilouti99/call-manager';
 const result = multiply(3, 7);
 ```
 
+## Android Manifest Notes
+
+`CallActivity` is an internal incoming-call UI surface. Host apps should keep it non-exported unless they have a deliberate, reviewed reason to expose it.
+
+When declaring it in the host manifest, keep `android:exported="false"` and only override the specific attributes you actually need. Example:
+
+```xml
+<manifest xmlns:tools="http://schemas.android.com/tools">
+  <application>
+    <activity
+      android:name="com.margelo.nitro.qusaieilouti99.callmanager.CallActivity"
+      android:theme="@style/YourIncomingCallTheme"
+      android:exported="false"
+      tools:replace="android:theme" />
+  </application>
+</manifest>
+```
+
 
 ## Contributing
 

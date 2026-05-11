@@ -61,6 +61,20 @@ object CallEngine {
   private const val NOTIF_CHANNEL_ID = "incoming_call_channel"
   private const val NOTIF_ID = 2001
 
+  /**
+   * Trusted display snapshot for the internal incoming-call UI.
+   *
+   * This data is resolved from CallEngine's own in-memory call state. It must not be
+   * reconstructed from Activity launch extras, because host apps may accidentally export
+   * [CallActivity] and allow untrusted external launches.
+   */
+  internal data class IncomingCallUiState(
+    val callId: String,
+    val callerName: String,
+    val callType: String,
+    val callerAvatarUrl: String?
+  )
+
   // ✅ ADD THIS: Direct reference to prevent resource shrinking
   @Suppress("unused")
   private val KEEP_RINGBACK_RESOURCE = R.raw.ringback_tone
@@ -1270,6 +1284,39 @@ object CallEngine {
     it.value.state == CallState.HELD
   }
 
+  /**
+   * Resolves the only trusted input that [CallActivity] may consume from an external launch:
+   * a candidate call ID. All display data and lock-screen eligibility are derived from the
+   * validated internal call state.
+   */
+  internal fun resolveIncomingCallUiState(callId: String?): IncomingCallUiState? {
+    if (callId.isNullOrBlank()) {
+      Log.w(TAG, "Rejecting CallActivity launch: missing callId")
+      return null
+    }
+
+    val callInfo = activeCalls[callId]
+    if (callInfo == null) {
+      Log.w(TAG, "Rejecting CallActivity launch: callId=$callId not found in active call state")
+      return null
+    }
+
+    if (callInfo.state != CallState.INCOMING) {
+      Log.w(
+        TAG,
+        "Rejecting CallActivity launch: callId=$callId is not ringing (state=${callInfo.state})"
+      )
+      return null
+    }
+
+    return IncomingCallUiState(
+      callId = callInfo.callId,
+      callerName = callInfo.displayName,
+      callType = callInfo.callType,
+      callerAvatarUrl = callInfo.pictureUrl
+    )
+  }
+
   private fun validateOutgoingCallRequest(): Boolean {
     return !activeCalls.any {
       (!canMakeMultipleCalls && (it.value.state == CallState.INCOMING || it.value.state == CallState.ACTIVE))
@@ -1333,10 +1380,10 @@ object CallEngine {
 
     if (hasOverlayPermission && isDeviceLocked) {
       Log.d(TAG, "Overlay permission granted and device is locked - attempting CallActivity overlay.")
-      showCallActivityOverlay(context, callId, callerName, callType, callerPicUrl)
+      showCallActivityOverlay(context, callId)
     } else if (hasOverlayPermission && !useCallStyleNotification) {
       Log.d(TAG, "Overlay permission granted and CallStyle not supported - attempting CallActivity overlay.")
-      showCallActivityOverlay(context, callId, callerName, callType, callerPicUrl)
+      showCallActivityOverlay(context, callId)
     }
     else {
       Log.d(TAG, "Defaulting to standard notification (e.g., unlocked and CallStyle supported, or no overlay permission).")
@@ -1345,7 +1392,7 @@ object CallEngine {
     playRingtone()
   }
 
-  private fun showCallActivityOverlay(context: Context, callId: String, callerName: String, callType: String, callerPicUrl: String?) {
+  private fun showCallActivityOverlay(context: Context, callId: String) {
     val overlayIntent = Intent(context, CallActivity::class.java).apply {
       addFlags(
         Intent.FLAG_ACTIVITY_NEW_TASK or
@@ -1353,11 +1400,7 @@ object CallEngine {
         Intent.FLAG_ACTIVITY_NO_ANIMATION or
         Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS
       )
-      putExtra("callId", callId)
-      putExtra("callerName", callerName)
-      putExtra("callType", callType)
-      callerPicUrl?.let { putExtra("callerAvatar", it) }
-      putExtra("LOCK_SCREEN_MODE", true) // Indicate that this is a lock screen bypass attempt
+      putExtra(CallActivity.EXTRA_CALL_ID, callId)
     }
 
     try {
@@ -1372,7 +1415,21 @@ object CallEngine {
       Log.d(TAG, "Successfully launched CallActivity overlay")
     } catch (e: Exception) {
       Log.e(TAG, "Failed to launch CallActivity overlay: ${e.message}. Falling back to standard notification.", e)
-      showStandardNotification(context, callId, callerName, callType, callerPicUrl)
+      val trustedCall = resolveIncomingCallUiState(callId)
+      if (trustedCall != null) {
+        showStandardNotification(
+          context,
+          trustedCall.callId,
+          trustedCall.callerName,
+          trustedCall.callType,
+          trustedCall.callerAvatarUrl
+        )
+      } else {
+        Log.w(
+          TAG,
+          "Skipping standard notification fallback because callId=$callId is no longer a trusted incoming call"
+        )
+      }
     }
   }
 
@@ -1382,10 +1439,7 @@ object CallEngine {
 
     val fullScreenIntent = Intent(context, CallActivity::class.java).apply {
       addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-      putExtra("callId", callId)
-      putExtra("callerName", callerName)
-      putExtra("callType", callType)
-      callerPicUrl?.let { putExtra("callerAvatar", it) }
+      putExtra(CallActivity.EXTRA_CALL_ID, callId)
     }
 
     val fullScreenPendingIntent = PendingIntent.getActivity(

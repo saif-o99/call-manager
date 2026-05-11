@@ -1,8 +1,6 @@
 package com.margelo.nitro.qusaieilouti99.callmanager
 
 import android.app.Activity
-import android.app.KeyguardManager
-import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color
@@ -18,7 +16,6 @@ import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
-import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
@@ -26,6 +23,13 @@ import android.widget.TextView
 import java.net.HttpURLConnection
 import java.net.URL
 
+/**
+ * Internal incoming-call surface owned by [CallEngine].
+ *
+ * This Activity is not a public entry point. It must validate a trusted internal ringing call
+ * before showing any UI or enabling lock-screen behavior, because host apps may accidentally
+ * expose the component in their merged manifest.
+ */
 class CallActivity : Activity(), CallEngine.CallEndListener {
 
   private enum class FinishReason {
@@ -38,26 +42,35 @@ class CallActivity : Activity(), CallEngine.CallEndListener {
   private val timeoutMs = 60_000L
   private val uiHandler = Handler(Looper.getMainLooper())
   private val timeoutRunnable = Runnable {
+    val trustedCall = requireTrustedIncomingCallOrFinish() ?: return@Runnable
     finishReason = FinishReason.TIMEOUT
     CallEngine.stopRingtone()
     CallEngine.cancelIncomingCallUI()
-    CallEngine.endCall(callId)
+    CallEngine.endCall(trustedCall.callId)
     finishCallActivity()
   }
 
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
-    setupLockScreenBypass() // Call without isSamsung parameter
+    val trustedCall = CallEngine.resolveIncomingCallUiState(
+      intent.getStringExtra(EXTRA_CALL_ID)
+    ) ?: run {
+      rejectUntrustedLaunch()
+      return
+    }
 
-    callId    = intent.getStringExtra("callId") ?: ""
-    callType  = intent.getStringExtra("callType") ?: "Audio"
-    val callerName = intent.getStringExtra("callerName") ?: "Unknown"
-    val avatarUrl  = intent.getStringExtra("callerAvatar")
-
+    callId = trustedCall.callId
+    callType = trustedCall.callType
+    setupLockScreenBypass()
     CallEngine.registerCallEndListener(this)
-    buildUi(callerName, avatarUrl)
+    buildUi(trustedCall.callerName, trustedCall.callerAvatarUrl)
     uiHandler.postDelayed(timeoutRunnable, timeoutMs)
     Log.d(TAG, "CallActivity setup complete for callId=$callId")
+  }
+
+  override fun onResume() {
+    super.onResume()
+    requireTrustedIncomingCallOrFinish()
   }
 
   private fun buildUi(name: String, avatarUrl: String?) {
@@ -315,24 +328,26 @@ class CallActivity : Activity(), CallEngine.CallEndListener {
   }
 
   private fun onAnswer() {
+    val trustedCall = requireTrustedIncomingCallOrFinish() ?: return
     finishReason = FinishReason.ANSWER
     CallEngine.stopRingtone()
     CallEngine.cancelIncomingCallUI()
 
-    // Use the unified answer flow with isLocalAnswer = true
-    CallEngine.answerCall(callId, isLocalAnswer = true)
+    CallEngine.answerCall(trustedCall.callId, isLocalAnswer = true)
     finishCallActivity()
   }
 
   private fun onDecline() {
+    val trustedCall = requireTrustedIncomingCallOrFinish() ?: return
     finishReason = FinishReason.DECLINE
     CallEngine.stopRingtone()
     CallEngine.cancelIncomingCallUI()
-    CallEngine.endCall(callId)
+    CallEngine.endCall(trustedCall.callId)
     finishCallActivity()
   }
 
-  // Changed to no longer take isSamsung parameter, simplified logic for minSdk 28
+  // Lock-screen presentation is only enabled after the launch has been validated against
+  // CallEngine's internal ringing-call state.
   private fun setupLockScreenBypass() {
     // For minSdkVersion 28, setShowWhenLocked(true) and setTurnScreenOn(true) are always available (API 27).
     setShowWhenLocked(true)
@@ -341,10 +356,11 @@ class CallActivity : Activity(), CallEngine.CallEndListener {
 
   @Suppress("DEPRECATION") // Suppress warning for onBackPressed override
   override fun onBackPressed() {
+    val trustedCall = requireTrustedIncomingCallOrFinish() ?: return
     finishReason = FinishReason.MANUAL_DISMISS
     CallEngine.stopRingtone()
     CallEngine.cancelIncomingCallUI()
-    CallEngine.endCall(callId)
+    CallEngine.endCall(trustedCall.callId)
     finishCallActivity()
   }
 
@@ -359,10 +375,32 @@ class CallActivity : Activity(), CallEngine.CallEndListener {
     super.onDestroy()
     CallEngine.unregisterCallEndListener(this)
     uiHandler.removeCallbacks(timeoutRunnable)
-    if (finishReason != FinishReason.ANSWER) {
+    if (
+      finishReason == FinishReason.DECLINE ||
+      finishReason == FinishReason.TIMEOUT ||
+      finishReason == FinishReason.MANUAL_DISMISS
+    ) {
       CallEngine.stopRingtone()
       CallEngine.cancelIncomingCallUI()
     }
+  }
+
+  private fun requireTrustedIncomingCallOrFinish(): CallEngine.IncomingCallUiState? {
+    val trustedCall = CallEngine.resolveIncomingCallUiState(callId)
+    if (trustedCall != null) {
+      return trustedCall
+    }
+
+    if (!isFinishing) {
+      finishReason = FinishReason.EXTERNAL_END
+      finish()
+    }
+    return null
+  }
+
+  private fun rejectUntrustedLaunch() {
+    Log.w(TAG, "Rejecting CallActivity launch because validation against CallEngine state failed")
+    finish()
   }
 
   private fun finishCallActivity() {
@@ -378,6 +416,7 @@ class CallActivity : Activity(), CallEngine.CallEndListener {
   ).toInt()
 
   companion object {
+    internal const val EXTRA_CALL_ID = "callId"
     private const val TAG = "CallActivity"
   }
 }
